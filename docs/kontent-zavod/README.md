@@ -60,13 +60,13 @@
 
 **Под постом:**
 - ✅ Approved (`pa:<task_id>`) → отмечает `source_data.post_approved=true`
-- 🔄 Миша по новой (`pr:<task_id>`) → ⚠️ пока показывает "в разработке" (задача на 2026-05-12)
+- 🔄 Миша по новой (`pr:<task_id>`) → `source_data.regen_mode='post_only'`, перезапускает Post+Image Agent, который сгенерирует только **новый пост** (картинку оставит ту же)
 - ✍️ Бля ну ты че (`pf:<task_id>`) → ⚠️ feedback в разработке
 
 **Под картинкой:**
 - ✅ Approved (`ia:<task_id>`) → отмечает `source_data.image_approved=true`
-- 🎲 Ещё (`im:<task_id>`) → ⚠️ пока показывает "в разработке"
-- ✍️ Бля ну ты че (`if:<task_id>`)
+- 🎲 Ещё (`im:<task_id>`) → `source_data.regen_mode='image_only'`, перезапускает Post+Image Agent → только **новая картинка** (пост остаётся)
+- ✍️ Бля ну ты че (`if:<task_id>`) → ⚠️ feedback в разработке
 
 **Логика combined publish:**
 1. Пользователь жмёт Approved на пост ИЛИ картинку
@@ -105,9 +105,13 @@ Telegram Trigger
         TRUE → Parse Callback (Code: action + task_id)
              → Load Callback Task (Supabase: id=task_id)
              → Route Callback (Switch)
-                 case 0 (i, pr, im) → Update Task to Created → Execute Post + Image (CB)
+                 case 0 (i, pr, im) → Set Regen Mode (Code) → Update Task to Created → Execute Post + Image (CB)
+                                       Set Regen Mode читает action и пишет в source_data.regen_mode:
+                                         'i'  → null (full)
+                                         'pr' → 'post_only', сброс post_approved
+                                         'im' → 'image_only', сброс image_approved
                  case 1 (n)         → Delete Task
-                 case 2 (pa)        → Set Approval Flag → Save → Both Approved? → Publish / Wait
+                 case 2 (pa)        → Set Approval Flag (Code, parseMaybeString) → Save → Both Approved? → Publish / Wait
                  case 3 (ia)        → то же что pa
                  case 4 (pf, if)    → Send Feedback Prompt
         FALSE → существующий поток обработки сообщений
@@ -124,22 +128,41 @@ Telegram Trigger
 хочу пост про Tesla Cybertruck и картинку к нему
 ```
 
-**Поток (12 нод):**
+**Поток (15 нод, с раздельной регенерацией):**
 ```
 Trigger → Load Task (Supabase)
     → Prepare Context
     → Search Web (Serper — 5 актуальных результатов Google)
-    → Write Post (OpenRouter/Gemini 2.5 Flash — HTTP Request)
-         Промпт включает: текущую дату + результаты поиска + запрос пользователя
+    → Write Post (OpenRouter/Gemini 2.5 Flash)
+         Промпт: текущая дата + результаты поиска + запрос пользователя
          Возвращает JSON: { post_text: "...", image_prompt: "..." }
-    → Parse Post + Image Prompt (Code — парсит JSON с fallback на raw text)
+    → Parse Post + Image Prompt (Code — robust парсер, ловит любой регистр ключей: post_text/posttext/postText)
     → Generate Image (fal.ai flux-pro/v1.1-ultra — async queue)
     → Wait 40s
-    → Get Image Result (fal.ai — использует response_url из очереди)
-    → Send Post (Telegram)
-    → Send Image (Telegram sendPhoto — URL из images[0].url)
-    → Update Task (Supabase)
+    → Get Image Result (fal.ai — response_url из очереди)
+    → Prepare Update Data (Code) ⭐ NEW
+         Читает task.source_data.regen_mode
+         Если 'image_only' → берёт post_text из versions[-1] (старый)
+         Если 'post_only'  → берёт image_url из versions[-1] (старый)
+         Иначе → использует свежие данные
+         Создаёт новую версию в agent_output.versions[]
+    → Should Send Post? (IF) ⭐ NEW — пропускает Send Post при image_only
+        TRUE → Send Post (Telegram, с inline-кнопками pa/pr/pf)
+        FALSE → Should Send Image?
+    → Should Send Image? (IF) ⭐ NEW — пропускает Send Image при post_only
+        TRUE → Send Image (Telegram sendPhoto, с кнопками ia/im/if)
+        FALSE → Update Task
+    → Update Task (Supabase, agent_output = объект с versions[])
 ```
+
+**Логика раздельной регенерации:**
+- При `regen_mode = null` (initial) — генерирует и отправляет всё
+- При `regen_mode = 'post_only'` — генерирует и отправляет только пост, картинка из старой версии переносится в новую
+- При `regen_mode = 'image_only'` — отправляет только картинку, пост из старой версии переносится
+
+**ВАЖНО — Supabase JSONB обработка:**
+- `source_data` и `agent_output` нужно передавать в Supabase ноду как **объекты**, НЕ как `JSON.stringify(...)` — иначе сохранится как строка → `valid_agent_output` constraint упадёт
+- При чтении из БД (Code-ноды) используй `parseMaybeString()` — старые записи могли быть сохранены как строки/двойно-строки
 
 **Ключевые особенности:**
 - AI сам генерирует `image_prompt` релевантный теме поста (не пользователю)
@@ -220,6 +243,10 @@ Trigger → Load Task (Supabase)
 | News Parser | Filter Unique Articles падал на error объектах от RSS Read | Добавлен фильтр `if (j.error && j.message) continue` |
 | Supabase | Airtable credential 403 Forbidden — база удалена | Новый Personal Access Token + перепривязка base ID на `app537M89rSzkIpIN` |
 | Supabase | `tasks_department_check` не включал `post_with_image` | ALTER TABLE: добавлен в CHECK constraint |
+| Post+Image Agent | Parse Post + Image Prompt: AI возвращал `posttext`/`imageprompt` (без underscore) → post_text = весь JSON | Robust парсер с `normalizeKeys()`: ловит posttext, post_text, postText, post-text — все варианты |
+| Post+Image Agent | Раздельная регенерация (pr/im) не работала — regen_mode всегда читался как null | Source_data хранился в БД как **двойно-эскейпированная строка** (`"\"{...}\""`). Code-ноды передавали `JSON.stringify(obj)` → Supabase сохранял как JSON-литерал. Фикс: передавать **объект** напрямую (`={{ $json.source_data }}` без stringify) |
+| Post+Image Agent | `valid_agent_output` constraint падал на новых записях | Та же причина — `agent_output` сохранялся строкой. Теперь передаётся объект. `parseMaybeString()` в Code-нодах раскапывает старые записи |
+| Qualifizer | Set Regen Mode / Set Approval Flag читали source_data как объект, но он мог быть строкой | Добавлена `parseMaybeString()` функция, которая парсит до 2 уровней JSON-вложенности |
 | News Parser | ScrapingBee community нода не установлена | Установлена через n8n Settings → Community Nodes |
 | News Parser | Ссылался на старый ID Longread Writer | Обновлён на `tX4ug1Ziml0Owcu4` |
 | Все воркфлоу | Telegram-ноды с невалидными операциями | Добавлены resource + operation |
