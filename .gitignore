@@ -1,6 +1,9 @@
 # Claude Code local settings (user-specific, not for repo)
 .claude/settings.local.json
 
+# MCP servers config (contains API tokens)
+.mcp.json
+
 # OS
 .DS_Store
 Thumbs.db
@@ -14,3 +17,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# Local Netlify folder
+.netlify

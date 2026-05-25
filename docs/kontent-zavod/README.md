@@ -250,6 +250,15 @@ Trigger → Load Task (Supabase)
 | News Parser | ScrapingBee community нода не установлена | Установлена через n8n Settings → Community Nodes |
 | News Parser | Ссылался на старый ID Longread Writer | Обновлён на `tX4ug1Ziml0Owcu4` |
 | Все воркфлоу | Telegram-ноды с невалидными операциями | Добавлены resource + operation |
+| News Parser | ScrapingBee триал кончился (1000/1000 запросов, истёк 20.05) → 451 SecurityCompromiseError | Заменён на **Jina Reader** (`https://r.jina.ai/<URL>`) — бесплатно, без авторизации. Code1 парсит JSON `{data:{title,content}}` |
+| News Parser | Все статьи в один прогон валились на одном домене (TechCrunch блокировал Jina за частые запросы) | `Filter Unique Articles`: добавлен **per-domain limit = 3** + фильтр по дате (статьи старше 14 дней режутся) |
+| News Parser | Reddit / другие источники блокируют скрейпинг → `full_text` = "You've been blocked" | Code1: fallback на `content`/`contentSnippet` из RSS если Jina вернула мусор. Score & Format Digest: явная инструкция AI игнорировать мусорный `full_text`, оценивать по title и source |
+| News Parser | AI выбирал только 1 из 3 статей (промпт лимитировал 5-7) | Промпт переписан: "из присланных материалов отбери ВСЕ подходящие, минимум 1, максимум 7. Если входных мало — бери все осмысленные" |
+| News Parser | `Create Digest Task` падал на NOT NULL constraint `chat_id` когда AI возвращал `items: []` | `Parse Digest Items` возвращает `[]` вместо защитного маркера `{_empty:true}` — воркфлоу мирно останавливается |
+| Qualifizer | `Execute Post + Image` и `Execute Post + Image (CB)` потеряли `workflowId` → "Missing required parameters" блокировал любой апдейт воркфлоу | Прописан явно: `workflowId.value = 'uZeulxyswE9tOwdJ'`, `typeVersion: 1.3` |
+| Qualifizer | `Publish to Channel`: `Bad Request: message caption is too long` (Telegram caption ≤ 1024 символа) | Разнесено на 2 ноды: `Publish to Channel` (sendPhoto, **без caption** — только картинка) → `Publish Caption` (sendMessage с post_text). В канале выглядит как 2 сообщения подряд |
+| Post + Image Agent | AI генерил посты про события полугодовой давности с пометкой "Anthropic выкатил..." (старая инфа из RSS подкастов) | Промпт `Write Post`: явный запрет слов "выкатил/анонсировал/представил/новинка/пока вы спали" для событий старше 30 дней. AI обязан проверять `date` в snippet'ах Serper. Если дата подтверждает свежесть — пишет нейтрально |
+| Post + Image Agent | Стиль постов был "ChatGPT-ный", не соответствовал voice profile | Промпт переписан под персонажа LeftHand: на "ты", прямо, без воды, лимит 400-1500 знаков, 1 инсайт = 1 пост, без "в данной статье", "подписывайтесь" |
 
 ---
 
