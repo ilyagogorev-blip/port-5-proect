@@ -9,7 +9,7 @@ from groq import Groq
 from pynput import mouse
 from pynput.keyboard import Controller, Key
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "ВСТАВЬ_КЛЮЧ_СЮДА")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
 SAMPLE_RATE = 16000
